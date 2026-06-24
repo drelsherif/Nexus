@@ -1,0 +1,108 @@
+{
+  "task_name": "ADE Classification",
+  "description": "Classify medical literature sentences as reporting an Adverse Drug Event (ADE) — an unintended harmful outcome caused by a drug — versus NOT_ADE (therapeutic effects, negated events, mechanism descriptions, or sentences without documented patient harm).",
+
+  "labels": ["ADE", "NOT_ADE"],
+  "positive_label": "ADE",
+  "negative_label": "NOT_ADE",
+
+  "class_prior": "auto",
+  "ade_bias_softening": 0.5,
+
+  "optimization_target": "fbeta",
+  "optimization_beta": 2.0,
+
+  "embed_model": "pritamdeka/S-PubMedBert-MS-MARCO",
+
+  "route_definitions": [
+    {
+      "name": "causation",
+      "focus": "Does the sentence contain DIRECT causal language linking a specific drug to a harmful or unintended outcome? Causal signals: caused, induced, associated with, resulted in, led to, following [drug], due to [drug], [drug]-related, developed after. NOT causal: drug mentioned without harm link, desired therapeutic effect, negated outcome, hypothetical scenario.",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "negation",
+      "focus": "Is any adverse outcome in the sentence NEGATED, denied, hypothetical, or qualified as absent? Negation signals: no, not, without, denied, failed to develop, did not experience, absence of, ruled out, tolerates well, no evidence of. Scope matters: 'no relief from pain' negates relief — NOT an ADE signal. 'did not develop nephrotoxicity' negates the ADE — classify NOT_ADE.",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "drug_effect",
+      "focus": "Based on the retrieved literature examples, does this sentence describe a known or plausible drug-adverse effect relationship? If retrieved ADE examples are highly similar (score > 0.85), weight them heavily. If retrieved examples are mixed, rely on pharmacological reasoning. Consider: is this a known side effect profile for the drug class? Is the effect dose-dependent or idiosyncratic?",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "context",
+      "focus": "Is the described outcome a desired therapeutic effect or an unintended adverse event? Therapeutic (NOT_ADE): pain relief, infection cleared, blood pressure controlled, tumor regression, glucose normalized, desired pharmacological action. Adverse (ADE): unexpected toxicity, organ damage, hypersensitivity reaction, side effects not part of therapeutic goal. Also NOT_ADE: general mechanism-of-action descriptions, laboratory findings without documented patient harm, resistance mutations, epidemiological association statements.",
+      "default_vote": "NOT_ADE"
+    }
+  ],
+
+  "feature_flags": {
+    "has_induced":    "\\binduced\\b",
+    "has_associated": "\\bassociated with\\b",
+    "has_toxicity":   "\\btoxicit|\\btoxic\\b",
+    "has_adverse":    "\\badverse\\b",
+    "has_developed":  "\\bdeveloped\\b",
+    "has_following":  "\\bfollowing\\b",
+    "has_reaction":   "\\breaction\\b",
+    "has_report":     "\\breport(?:ed|ing)?\\b",
+    "has_negation":   "\\b(?:no|not|without|denied|absence|failed to|did not|tolerates)\\b",
+    "has_short":      "__len_lt_15__",
+    "has_drug_name":  "__drug_registry__"
+  },
+
+  "seed_nodes": [
+    {
+      "id": "ROOT",
+      "trigger": null,
+      "description": "General ADE classifier — handles all cases not caught by specialist nodes",
+      "prompt": "You are an expert pharmacovigilance classifier trained to identify Adverse Drug Events (ADEs) in medical literature.\n\nAn Adverse Drug Event (ADE) is an unintended, harmful outcome caused by or associated with a drug. This includes: toxicity, organ damage, hypersensitivity reactions, unexpected side effects documented in a patient.\n\nNOT an ADE: desired therapeutic effects (tumor shrinkage, pain relief, infection clearance), negated adverse outcomes, mechanism-of-action descriptions without patient harm, epidemiological association statements without a specific patient case.\n\nClassify the following sentence as ADE or NOT_ADE.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "NODE_NEGATION",
+      "trigger": "has_negation",
+      "description": "Specialist for sentences with negation language — most common source of false positives",
+      "prompt": "You are a negation specialist in pharmacovigilance NLP. This sentence has been flagged as containing negation language.\n\nYour task: determine whether any adverse outcome in the sentence is EXPLICITLY NEGATED, absent, or hypothetical.\n\nKey principle: negation scope matters. 'No relief from pain' negates relief — it does NOT mean an ADE is present. 'Did not develop nephrotoxicity' negates the ADE — classify NOT_ADE. 'No evidence of toxicity' → NOT_ADE. 'Rash did not resolve' → rash is still present → ADE.\n\nClassify as ADE only if an adverse event is AFFIRMED (even in the presence of other negated elements).\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "NODE_INDUCED",
+      "trigger": "has_induced or has_associated",
+      "description": "Specialist for sentences with explicit causal language — high-confidence ADE patterns",
+      "prompt": "You are a causation specialist in pharmacovigilance. This sentence contains direct causal language ('induced' or 'associated with').\n\nYour task: confirm whether this causal language links a specific drug to a documented adverse outcome in a patient.\n\nTrue causation: 'Drug X induced nephrotoxicity in the patient' — direct drug→harm attribution.\nNot causation: 'Associated with improved outcomes' (beneficial, not adverse). 'Fever associated with infection, not drug' (attribution to non-drug cause). 'Mechanisms associated with drug resistance' (no patient harm).\n\nClassify as ADE if a drug is causally attributed to a harmful patient outcome.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "NODE_SHORT",
+      "trigger": "has_short and not has_negation",
+      "description": "Specialist for short telegraphic sentences — often high-confidence ADE reports",
+      "prompt": "You are a clinical notation specialist in pharmacovigilance. This is a short sentence (under 15 words), typical of telegraphic clinical notes or case report abstracts.\n\nShort sentences in medical literature often represent high-confidence condensed ADE reports: 'Amoxicillin rash.' 'Vancomycin-induced nephrotoxicity.' 'Hepatotoxicity from methotrexate.'\n\nBut they can also be incomplete: drug names with no harm described, diagnostic labels without drug attribution, or isolated findings.\n\nClassify based on whether this short sentence unambiguously links a drug to an adverse outcome.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    }
+  ],
+
+  "hyperparameters": {
+    "rounds": 20,
+    "batch_size": 200,
+    "eval_size": 100,
+    "probe_size": 100,
+    "k": 5,
+    "engram_threshold": 5,
+    "engram_similarity": 0.80,
+    "principle_retrieval_sim": 0.60,
+    "mcq_retrieval_sim": 0.70,
+    "mcq_k": 3,
+    "graft_threshold": 0.005,
+    "refine_threshold": 0.002,
+    "retire_threshold": -0.010,
+    "retire_min_rounds": 3,
+    "retire_max_routes_per_round": 2,
+    "baseline_size": 50,
+    "calibration_interval": 3,
+    "calibration_probe_size": 20,
+    "error_buffer_size": 60,
+    "meta_interval": 5,
+    "workers": 4,
+    "learning_rate": 0.05,
+    "route_penalty": 1.5,
+    "route_weight_min": 0.1,
+    "route_weight_max": 3.0
+  }
+}

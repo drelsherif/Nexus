@@ -1,0 +1,45 @@
+# ── Run outputs ───────────────────────────────────────────────
+run_v3_*/
+run_04/
+run_05_branch_*/
+run_06_micro/
+run_07_rag/
+run_08_rag/
+population_runs/
+results/
+
+# ── Manuscript and paper figures ──────────────────────────────
+paper/
+
+# ── Generated artifacts ───────────────────────────────────────
+*.db
+*.log
+nexus_best_tree.json
+nexus_final_tree.json
+nexus_chronicle.json
+nexus_nuggets.json
+nexus_summary.json
+nexus_results.csv
+nexus_f1_curve.png
+nexus_debug.log
+global_rag_index/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── Secrets ───────────────────────────────────────────────────
+.env
+*.env
+secrets.json
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
