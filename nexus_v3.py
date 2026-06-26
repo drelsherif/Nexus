@@ -223,6 +223,38 @@ def run_v3(args):
     # Apply task config route definitions to expert_routes
     _patch_routes_from_config(config)
 
+    # ── Startup API sanity check ──────────────────────────────────────────────
+    if not args.mock:
+        print("[V3] Testing API connectivity...")
+        _test_system = (
+            f"You are a test classifier. "
+            f'Respond ONLY with JSON: {{"vote": "ADE" or "NOT_ADE", '
+            f'"confidence": 0.0-1.0, "reasoning": "<one sentence>"}}'
+        )
+        _test_sentence = "Phenytoin-induced hypersensitivity reactions."
+        try:
+            _raw = route_llm_fn(_test_system, f'Classify: "{_test_sentence}"')
+            _d = json.loads(_raw) if isinstance(_raw, str) else _raw
+            _vote = (_d or {}).get("vote") if isinstance(_d, dict) else None
+            # Also accept 'classification' key if model ignores schema
+            if not _vote and isinstance(_d, dict):
+                _vote = _d.get("classification")
+            if _vote in (config.positive_label, config.negative_label):
+                print(f"[V3] API OK — test vote={_vote!r} for known ADE sentence "
+                      f"(expected '{config.positive_label}')")
+                if _vote != config.positive_label:
+                    print(f"[V3] WARNING: Model voted {_vote!r} for obvious ADE — "
+                          f"may need lower ADE_BIAS to compensate for conservative model.")
+            else:
+                print(f"[V3] WARNING: API returned unexpected format: {_d}")
+                print(f"[V3] Route calls may not work. Check model compatibility.")
+                print(f"[V3] Raw response: {_raw!r:.200}")
+        except Exception as _e:
+            print(f"[V3] CRITICAL: API test failed: {type(_e).__name__}: {_e}")
+            print(f"[V3] Check AIHUB_API_KEY, AIHUB_AD_OBJECT_ID, and network connectivity.")
+            print(f"[V3] Aborting — routes will silently return NOT_ADE on every call.")
+            sys.exit(1)
+
     print(f"\n{'═'*64}")
     print(f"  NEXUS v3 — {config.task_name}")
     print(f"  Out: {args.out}  Rounds: {args.rounds}")
@@ -284,6 +316,11 @@ def run_v3(args):
     history: list[dict] = []
     rng = random.Random(args.seed)
 
+    # Case tracking: record which corpus indices were used in training
+    trained_indices: set[int] = set()
+    trained_cases_log = out / "trained_cases.jsonl"
+    trained_cases_log.unlink(missing_ok=True)  # Fresh log each run
+
     # Workers from config or CLI
     workers = config.get_hyperparameter("workers", args.workers)
 
@@ -315,7 +352,33 @@ def run_v3(args):
         batch_size = config.get_hyperparameter("batch_size", 50)
         batch = rng.sample(train_pool, min(batch_size, len(train_pool)))
 
+        # Log which cases this round trained on
+        import json as _json
+        with open(trained_cases_log, "a") as _f:
+            for _c in batch:
+                _idx = _c.get("_corpus_idx", -1)
+                trained_indices.add(_idx)
+                _f.write(_json.dumps({"round": rnd, "corpus_idx": _idx,
+                                      "label": _c["label"]}) + "\n")
+
         correct = errors = swr_events = splits = grafts = 0
+        near_miss_count = positive_count = 0
+
+        # Per-round budgets: max MCQ calls for near-miss and positive (token control)
+        near_miss_budget = config.get_hyperparameter("near_miss_mcq_budget", 3)
+        positive_budget  = config.get_hyperparameter("positive_mcq_budget", 2)
+
+        # Build global MCQ pool from all nodes for cross-node retrieval fallback
+        from mcq_generator import MCQLibrary as _MCQLibrary
+        global_mcq_pool = _MCQLibrary()
+        for _n in tree.all_nodes():
+            for _q in _n.mcq_library._questions:
+                global_mcq_pool._questions.append(_q)
+        if global_mcq_pool._questions:
+            import numpy as _np
+            global_mcq_pool._embeddings = _np.array(
+                [q.embedding for q in global_mcq_pool._questions], dtype=_np.float32
+            )
 
         for i, case in enumerate(batch):
             text = case["text"]
@@ -330,6 +393,8 @@ def run_v3(args):
                 route_llm_fn=route_llm_fn,
                 global_rag_index=global_rag,
                 workers=workers,
+                global_mcq_pool=global_mcq_pool if len(node.mcq_library) < 3 else None,
+                round_num=rnd,
             )
 
             if result.route_result.split:
@@ -339,6 +404,52 @@ def run_v3(args):
                 correct += 1
                 # Update route weights on correct prediction too
                 node.update_weights_on_correct(result.route_result, true_label)
+
+                # Near-miss MCQ: correct but score margin was tight
+                ade_s     = result.route_result.ade_score
+                not_ade_s = result.route_result.not_ade_score
+                max_s = max(ade_s, not_ade_s, 1e-9)
+                margin = abs(ade_s - not_ade_s) / max_s
+                if margin < 0.20 and near_miss_budget > 0:
+                    near_miss_budget -= 1
+                    near_miss_count += 1
+                    ctx = global_rag.query(text, k=4)
+                    # Determine which label is positive/negative for this margin
+                    wrong_label = config.negative_label if true_label == config.positive_label \
+                                  else config.positive_label
+                    q_nm = mcq_generator.generate_near_miss(
+                        text=text,
+                        correct_label=true_label,
+                        wrong_label=wrong_label,
+                        score_margin=margin,
+                        context_examples=ctx,
+                        llm_fn=freeform_llm_fn,
+                        node_id=node.id,
+                        round_num=rnd,
+                    )
+                    if q_nm:
+                        node.mcq_library.add(q_nm)
+
+                # Positive anchor MCQ: high-confidence correct
+                elif (result.route_result.agreement >= 0.95
+                      and result.route_result.confidence >= 0.90
+                      and positive_budget > 0):
+                    positive_budget -= 1
+                    positive_count += 1
+                    wrong_label = config.negative_label if true_label == config.positive_label \
+                                  else config.positive_label
+                    q_pos = mcq_generator.generate_positive(
+                        text=text,
+                        correct_label=true_label,
+                        wrong_label=wrong_label,
+                        confidence=result.route_result.confidence,
+                        llm_fn=freeform_llm_fn,
+                        node_id=node.id,
+                        round_num=rnd,
+                    )
+                    if q_pos:
+                        node.mcq_library.add(q_pos)
+
             else:
                 errors += 1
                 # Add this case to the routing node's RAG index
@@ -397,7 +508,8 @@ def run_v3(args):
                 bar = "█" * int(pct * 20) + " " * (20 - int(pct * 20))
                 acc = correct / max(1, i + 1)
                 print(f"\r  [{bar}] {i+1}/{len(batch)}  "
-                      f"acc={acc:.1%}  errors={errors}  swr={swr_events}  grafts={grafts}",
+                      f"acc={acc:.1%}  err={errors}  nm={near_miss_count}  "
+                      f"pos={positive_count}  swr={swr_events}  grafts={grafts}",
                       end="", flush=True)
 
         print()  # newline
@@ -512,6 +624,17 @@ def run_v3(args):
             "history": history,
         }, indent=2))
 
+    # Save unseen (never-trained) cases for held-out evaluation
+    unseen_cases = [c for c in train_pool if c.get("_corpus_idx", -1) not in trained_indices]
+    unseen_path = out / "unseen_cases.jsonl"
+    with open(unseen_path, "w") as _f:
+        for _c in unseen_cases:
+            _f.write(json.dumps({"corpus_idx": _c["_corpus_idx"],
+                                 "text": _c["text"], "label": _c["label"]}) + "\n")
+    print(f"\n[V3] Case tracking saved:")
+    print(f"  Trained on: {len(trained_indices)} unique cases → {trained_cases_log}")
+    print(f"  Held-out:   {len(unseen_cases)} truly unseen cases → {unseen_path}")
+
     # Final report
     total_mcqs = sum(len(n.mcq_library) for n in tree.all_nodes())
     total_principles = sum(len(n.injected_principles) for n in tree.all_nodes())
@@ -539,22 +662,46 @@ def _patch_routes_from_config(config: TaskConfig) -> None:
         def _route(text, examples, llm_fn, principle_context=""):
             system = cfg.build_route_system_prompt(route_def.name, principle_context)
             from expert_routes import _format_examples, _parse_json_vote, RouteResult
-            examples_text = _format_examples(examples)
+            # Separate ADE vs NOT_ADE examples explicitly — prevents NOT_ADE bias
+            # when corpus is imbalanced (71% NOT_ADE). Mirrors original route design.
+            pos = cfg.positive_label
+            neg = cfg.negative_label
+            pos_examples = [e for e in examples if e.get("label") == pos]
+            neg_examples = [e for e in examples if e.get("label") == neg]
+            if pos_examples or neg_examples:
+                examples_text = (
+                    f"{pos} examples (vote {pos} if this sentence matches):\n"
+                    f"{_format_examples(pos_examples, 3)}\n\n"
+                    f"{neg} examples (vote {neg} if this sentence matches):\n"
+                    f"{_format_examples(neg_examples, 2)}"
+                )
+            else:
+                examples_text = _format_examples(examples)
             user = (
                 f'Sentence: "{text}"\n\n'
-                f"Similar labeled examples:\n{examples_text}\n\n"
-                f"Based on your focus ({route_def.focus[:100]}...), vote {cfg.positive_label} or {cfg.negative_label}."
+                f"Retrieved literature examples for context:\n{examples_text}\n\n"
+                f"Focus: {route_def.focus}\n\n"
+                f"Vote {cfg.positive_label} or {cfg.negative_label}."
             )
             try:
                 raw = llm_fn(system, user)
                 d = _parse_json_vote(raw)
+                vote = d.get("vote")
+                # Handle 'classification' key fallback (some models ignore schema)
+                if vote not in (pos, neg):
+                    vote = d.get("classification", route_def.default_vote)
+                if vote not in (pos, neg):
+                    vote = route_def.default_vote
+                from expert_routes import _safe_float as _sf
                 return RouteResult(
                     route=route_def.name,
-                    vote=d.get("vote", route_def.default_vote),
-                    confidence=float(d.get("confidence", 0.5)),
-                    reasoning=d.get("reasoning", ""),
+                    vote=vote,
+                    confidence=_sf(d.get("confidence"), 0.5),
+                    reasoning=d.get("reasoning", d.get("rationale", "")),
                 )
             except Exception as e:
+                print(f"[ROUTE ERROR] {route_def.name}: {type(e).__name__}: {e}",
+                      file=sys.stderr)
                 return RouteResult(route_def.name, route_def.default_vote, 0.3, f"error: {e}")
         return _route
 
@@ -599,10 +746,39 @@ def calibrate_threshold(
     beta2  = beta ** 2
     pos    = config.positive_label
 
-    candidates = [0.5, 0.7, 0.9, 1.0, 1.1, 1.3, 1.5, 1.7, 2.0, 2.5, 3.0]
-    best_bias  = expert_routes.RouteAggregator.ADE_BIAS
-    best_score = -1.0
+    current_bias = expert_routes.RouteAggregator.ADE_BIAS
+    # Fixed grid + adaptive fine-grained range around current best.
+    # 0.3–0.6 = very aggressive (high recall, lower precision — good for early learning).
+    # 0.7–1.3 = balanced.
+    # 1.5–4.0 = conservative (high precision — use when false positives dominate).
+    base_candidates = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3,
+                       1.5, 1.7, 2.0, 2.5, 3.0, 4.0]
+    # Fine-grained steps centred on current bias (+/- 30% in 0.05 steps)
+    fine = [round(current_bias * f, 2)
+            for f in [0.7, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2, 1.3]]
+    candidates = sorted(set(base_candidates + fine))
     results    = []
+
+    # Compute the score AT the current bias first, so we only switch if
+    # a candidate is strictly better (prevents jumping to first candidate
+    # when all biases give the same score, e.g. F1=0 throughout).
+    def _score_at(bias):
+        tp = fp = fn = tn = 0
+        for ade_score, not_ade_score, true_label in score_cache:
+            pred = pos if ade_score >= not_ade_score * bias else config.negative_label
+            if pred == pos and true_label == pos:    tp += 1
+            elif pred == pos and true_label != pos:  fp += 1
+            elif pred != pos and true_label == pos:  fn += 1
+            else:                                    tn += 1
+        prec   = tp / max(1, tp + fp)
+        recall = tp / max(1, tp + fn)
+        fbeta_val = (1 + beta2) * prec * recall / max(1e-9, beta2 * prec + recall)
+        f1_val = 2 * prec * recall / max(1e-9, prec + recall)
+        return {"f1": f1_val, "recall": recall, "precision": prec}.get(target, fbeta_val) \
+               if target != "fbeta" else fbeta_val
+
+    best_bias  = current_bias
+    best_score = _score_at(current_bias)
 
     for bias in candidates:
         tp = fp = fn = tn = 0

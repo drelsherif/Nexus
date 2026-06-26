@@ -372,7 +372,7 @@ class GeminiClient:
         if self.tracker:
             self.tracker.record_classify(inp, out)
         if result is None:
-            result = {"classification": "NOT_ADE", "confidence": "low",
+            result = {"classification": "NOT_ADE", "confidence": 0.3,
                       "rationale": "parse_error"}
         return result, inp, out, lat
 
@@ -807,7 +807,7 @@ class AIHubClient:
         if self.tracker:
             self.tracker.record_classify(inp, out)
         if result is None:
-            result = {"classification": "NOT_ADE", "confidence": "low",
+            result = {"classification": "NOT_ADE", "confidence": 0.3,
                       "rationale": "parse_error"}
         return result, inp, out, lat
 
@@ -1132,7 +1132,7 @@ class OpenAIClient:
         if self.tracker:
             self.tracker.record_classify(inp, out)
         if result is None:
-            result = {"classification": "NOT_ADE", "confidence": "low",
+            result = {"classification": "NOT_ADE", "confidence": 0.3,
                       "rationale": "parse_error"}
         return result, inp, out, lat
 

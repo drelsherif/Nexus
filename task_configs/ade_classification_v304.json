@@ -103,9 +103,6 @@
     "learning_rate": 0.05,
     "route_penalty": 1.5,
     "route_weight_min": 0.1,
-    "route_weight_max": 3.0,
-    "near_miss_mcq_budget": 3,
-    "positive_mcq_budget": 2,
-    "near_miss_margin_threshold": 0.20
+    "route_weight_max": 3.0
   }
 }

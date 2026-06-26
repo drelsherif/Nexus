@@ -1,0 +1,106 @@
+{
+  "task_name": "ADE Classification — Cortex v1.0",
+  "description": "Classify medical literature sentences as ADE (Adverse Drug Event) or NOT_ADE. Cortex v1.0 uses biologically-grounded cortical column architecture with BCM plasticity, critical period dynamics, and competitive routing. Fixes all failure modes diagnosed in v3.04-enterprise.",
+
+  "labels": ["ADE", "NOT_ADE"],
+  "positive_label": "ADE",
+  "negative_label": "NOT_ADE",
+
+  "class_prior": "auto",
+  "ade_bias_softening": 0.5,
+
+  "optimization_target": "f1",
+  "optimization_beta": 1.0,
+
+  "embed_model": "pritamdeka/S-PubMedBert-MS-MARCO",
+
+  "route_definitions": [
+    {
+      "name": "causation",
+      "focus": "Direct causal language drug to harm",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "negation",
+      "focus": "Adverse outcome negated or hypothetical",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "drug_effect",
+      "focus": "Retrieved evidence confirms drug-effect pair",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "context",
+      "focus": "Therapeutic intent vs documented adverse outcome",
+      "default_vote": "NOT_ADE"
+    }
+  ],
+
+  "seed_nodes": [
+    {
+      "id": "ROOT",
+      "trigger": null,
+      "description": "Primary cortical column — general ADE classifier, fires when no specialist matches (specificity=0)",
+      "prompt": "You are an expert pharmacovigilance classifier trained to identify Adverse Drug Events (ADEs) in medical literature.\n\nAn Adverse Drug Event (ADE) is an unintended, harmful outcome caused by or associated with a drug — including toxicity, organ damage, hypersensitivity reactions, and unexpected side effects documented in a patient.\n\nNOT an ADE: desired therapeutic effects (tumor shrinkage, pain relief, infection clearance), negated adverse outcomes ('did not develop rash'), mechanism-of-action descriptions without patient harm, epidemiological association statements, laboratory findings without documented patient harm.\n\nClassify the following sentence as ADE or NOT_ADE.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "COL_NEGATION",
+      "trigger": "has_negation",
+      "description": "Negation specialist column — sentences with explicit negation language are most common false positive source (specificity=1)",
+      "prompt": "You are a negation specialist in pharmacovigilance NLP. This sentence contains negation language and must be classified carefully.\n\nKey principle — negation scope determines classification:\n  'No relief from pain' negates relief — NOT an ADE indicator. Classify NOT_ADE.\n  'Did not develop nephrotoxicity' negates the ADE — classify NOT_ADE.\n  'Rash did not resolve despite treatment' — rash IS present — classify ADE.\n  'No evidence of hepatotoxicity' — outcome absent — classify NOT_ADE.\n\nClassify as ADE only if an adverse event is AFFIRMED in the sentence despite negation of something else.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "COL_INDUCED",
+      "trigger": "has_induced or has_associated",
+      "description": "Causation specialist column — sentences with explicit causal language (induced, associated) are high-confidence ADE patterns (specificity=1)",
+      "prompt": "You are a causation specialist in pharmacovigilance. This sentence contains direct causal language ('induced' or 'associated with').\n\nYour task: confirm whether this causal language links a specific drug to a documented adverse outcome in a patient.\n\nTrue causation — classify ADE:\n  'Drug X induced nephrotoxicity' — direct drug-to-harm attribution.\n  'Cisplatin-induced peripheral neuropathy was observed.'\n\nNot causation — classify NOT_ADE:\n  'Associated with improved outcomes' — beneficial, not adverse.\n  'Fever associated with infection, not drug' — cause is non-drug.\n  'Mechanisms associated with drug resistance' — no patient harm.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "COL_SHORT",
+      "trigger": "has_short and not has_negation",
+      "description": "Short-sentence specialist column — telegraphic clinical notations without negation are often high-confidence ADE reports (specificity=2)",
+      "prompt": "You are a clinical notation specialist in pharmacovigilance. This is a short sentence (under 80 chars) without negation — typical of telegraphic clinical notes or case report abstracts.\n\nShort non-negated sentences in medical literature often represent condensed, high-confidence ADE reports:\n  'Amoxicillin rash.' — ADE\n  'Vancomycin-induced nephrotoxicity.' — ADE\n  'Hepatotoxicity from methotrexate.' — ADE\n\nBut can also be incomplete or non-ADE:\n  'Metformin prescribed for diabetes.' — therapeutic, NOT_ADE\n  'Drug resistance to penicillin.' — mechanism, NOT_ADE\n\nClassify based on whether this short sentence unambiguously links a drug to an adverse outcome.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    }
+  ],
+
+  "hyperparameters": {
+    "rounds": 20,
+    "batch_size": 250,
+    "eval_size": 200,
+    "probe_size": 300,
+    "k": 5,
+    "engram_threshold": 5,
+    "workers": 4,
+    "initial_firing_threshold": 1.723,
+    "bcm_tau": 0.15,
+    "critical_period_T_min": 0.60,
+    "critical_period_T_max": 0.85,
+    "critical_period_tau": 5.0,
+    "jaccard_overlap_threshold": 0.50,
+    "jaccard_f1_override": 0.03,
+    "apoptosis_min_activation": 2.0,
+    "apoptosis_min_rounds_alive": 3,
+    "working_memory_capacity": 60,
+    "route_timeout": 30.0
+  },
+
+  "_design_notes": {
+    "v3.04_failure_modes": [
+      "FM-1 Routing dilution: fixed by winner-take-all competitive routing (specificity-based)",
+      "FM-2 Route error NOT_ADE voting: fixed by route abstention (None return, excluded from ensemble)",
+      "FM-3 MCQ complexity harm: fixed by BCM-gated rehearsal weight (immature columns get less)",
+      "FM-4 Small eval pool: fixed (200 cases, was 100)",
+      "FM-5 Trigger overlap: fixed by Jaccard audit before columnar genesis (max=0.50)"
+    ],
+    "biological_mechanisms": [
+      "BCM theory (Bienenstock, Cooper, Munro 1982): sliding modification threshold",
+      "Critical period plasticity (Wiesel & Hubel 1963; Hensch 2004): rising genesis threshold",
+      "Competitive learning (Rumelhart & Zipser 1985): winner-take-all routing",
+      "Homeostatic plasticity (Turrigiano 1998): FiringThreshold calibration",
+      "Neurogenesis & apoptosis (Eriksson 1998): columnar genesis and pruning",
+      "Engram theory (Semon 1904; Josselyn 2015): MemoryTrace bequeathal on pruning",
+      "Predictive coding (Rao & Ballard 1999): classification as prediction, errors drive learning"
+    ]
+  }
+}

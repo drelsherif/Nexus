@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -80,6 +81,17 @@ def _format_examples(examples: list[dict], max_k: int = 4) -> str:
     return "\n".join(lines)
 
 
+def _safe_float(val, default: float = 0.5) -> float:
+    """Parse confidence value — handles both numeric and string ('low'/'medium'/'high')."""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        if isinstance(val, str):
+            return {"very high": 0.95, "high": 0.85, "medium": 0.6,
+                    "low": 0.3, "very low": 0.1}.get(val.lower().strip(), default)
+        return default
+
+
 def _parse_json_vote(raw: str) -> dict:
     raw = re.sub(r"```[a-z]*\n?", "", raw).strip()
     try:
@@ -124,10 +136,11 @@ def _causation_route(text: str, examples: list[dict], llm_fn: Callable, principl
         return RouteResult(
             route="causation",
             vote=d.get("vote", "NOT_ADE"),
-            confidence=float(d.get("confidence", 0.5)),
+            confidence=_safe_float(d.get("confidence"), 0.5),
             reasoning=d.get("reasoning", ""),
         )
     except Exception as e:
+        print(f"[ROUTE ERROR] causation: {type(e).__name__}: {e}", file=sys.stderr)
         return RouteResult("causation", "NOT_ADE", 0.3, f"error: {e}")
 
 
@@ -157,10 +170,11 @@ def _negation_route(text: str, examples: list[dict], llm_fn: Callable, principle
         return RouteResult(
             route="negation",
             vote=d.get("vote", "NOT_ADE"),
-            confidence=float(d.get("confidence", 0.5)),
+            confidence=_safe_float(d.get("confidence"), 0.5),
             reasoning=d.get("reasoning", ""),
         )
     except Exception as e:
+        print(f"[ROUTE ERROR] negation: {type(e).__name__}: {e}", file=sys.stderr)
         return RouteResult("negation", "NOT_ADE", 0.3, f"error: {e}")
 
 
@@ -196,10 +210,11 @@ def _drug_effect_route(text: str, examples: list[dict], llm_fn: Callable, princi
         return RouteResult(
             route="drug_effect",
             vote=d.get("vote", "NOT_ADE"),
-            confidence=float(d.get("confidence", 0.5)),
+            confidence=_safe_float(d.get("confidence"), 0.5),
             reasoning=d.get("reasoning", ""),
         )
     except Exception as e:
+        print(f"[ROUTE ERROR] drug_effect: {type(e).__name__}: {e}", file=sys.stderr)
         return RouteResult("drug_effect", "NOT_ADE", 0.3, f"error: {e}")
 
 
@@ -230,10 +245,11 @@ def _context_route(text: str, examples: list[dict], llm_fn: Callable, principle_
         return RouteResult(
             route="context",
             vote=d.get("vote", "NOT_ADE"),
-            confidence=float(d.get("confidence", 0.5)),
+            confidence=_safe_float(d.get("confidence"), 0.5),
             reasoning=d.get("reasoning", ""),
         )
     except Exception as e:
+        print(f"[ROUTE ERROR] context: {type(e).__name__}: {e}", file=sys.stderr)
         return RouteResult("context", "NOT_ADE", 0.3, f"error: {e}")
 
 

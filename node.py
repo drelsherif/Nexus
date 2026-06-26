@@ -153,6 +153,8 @@ class NexusNode:
         route_llm_fn: Callable,
         global_rag_index: Optional[RAGIndex] = None,
         workers: int = 4,
+        global_mcq_pool: Optional["MCQLibrary"] = None,
+        round_num: int = -1,
     ) -> NodeResult:
         """
         Full v3 classification:
@@ -179,10 +181,13 @@ class NexusNode:
                 if ex["text"] not in existing_texts and len(examples) < k:
                     examples.append(ex)
 
-        # Step 2: MCQ teaching cases
+        # Step 2: MCQ teaching cases (with cross-node fallback)
         mcq_k = self.task_config.get_hyperparameter("mcq_k", 3)
         mcq_sim = self.task_config.get_hyperparameter("mcq_retrieval_sim", 0.70)
-        mcq_context = self.mcq_library.format_for_context(text, k=mcq_k, min_sim=mcq_sim)
+        mcq_context = self.mcq_library.format_for_context(
+            text, k=mcq_k, min_sim=mcq_sim,
+            round_num=round_num, global_pool=global_mcq_pool,
+        )
         mcq_used = bool(mcq_context)
 
         # Step 3: Engram principles
