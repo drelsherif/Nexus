@@ -84,7 +84,7 @@ import numpy as np
 import data_utils
 import llm_client
 from embedder import embed as embedder_embed, embed_one as embedder_embed_one, enable_mock_embeddings
-from nexus_db_apex import NexusApexDB, classify_error_type, compute_delta
+from nexus_db_apex import NexusApexDB, classify_error_type, compute_delta, compute_salience
 from rag_index import RAGIndex
 from task_config import TaskConfig
 
@@ -94,18 +94,46 @@ from task_config import TaskConfig
 # ══════════════════════════════════════════════════════════════════════════════
 
 NEAR_MISS_THRESHOLD   = 0.62   # correct predictions below this are near-misses
-MIN_PAIR_DELTA        = 0.30   # minimum δ to qualify an error for pair generation
-MIN_DIRECTION_PCT     = 0.70   # ≥70% same direction before generating directional lesson
-EMA_ALPHA             = 0.30   # EMA weight on new calibration (0.70 on old)
-EMA_MIN_SHIFT         = 0.08   # minimum shift before EMA updates threshold
+MIN_PAIR_DELTA        = 0.25   # minimum δ to qualify an error for pair generation
+MIN_DIRECTION_PCT     = 0.65   # ≥65% same direction before generating directional lesson
+EMA_ALPHA             = 0.15   # EMA weight on new calibration (0.85 on old) — more stable
+EMA_MIN_SHIFT         = 0.12   # minimum shift before EMA updates threshold — wider dead zone
 THETA_SIZE            = 100    # hardest cases to reclassify in theta pass
 THETA_TOP_DELTA_N     = 50     # top-N by δ for theta selection
 THETA_TOP_NM_N        = 50     # top-N near-misses for theta selection
 CONSOLIDATION_EVERY   = 3      # consolidation every N rounds
-MAX_ACTIVE_PAIRS      = 30     # cap active pairs; retire lowest-δ when exceeded
+CONSOLIDATION_COOLDOWN = 1     # rounds to hold causal model stable after consolidation
+MAX_ACTIVE_PAIRS      = 50     # cap active pairs (raised for curriculum phases)
 LESSON_INJECT_START   = 4      # round from which lessons are injected
 NM_INJECT_START       = 7      # round from which near-miss examples are injected
 PAIR_TIMEOUT          = 35     # seconds per LLM call in pair generation
+
+# ── Salience gating (norepinephrine / amygdala) ───────────────────────────────
+SALIENCE_HIGH_THRESHOLD = 2.0  # salience >= this → bypass plasticity gate, immediate Core
+WEAK_SIGNAL_REPS        = 3    # low-δ error types need this many cumulative occurrences
+WEAK_SIGNAL_DELTA_MAX   = 0.45 # mean δ below this = weak signal (repetition required)
+
+# ── Curriculum learning schedule ─────────────────────────────────────────────
+# Mirrors developmental learning: simple → complex, small batches → large.
+# Small batches early: high error rate → high plasticity → rapid pair generation.
+# Large batches late: stress-test generalisation across full complexity.
+CURRICULUM = [
+    (10,  50),   # Phase 1: rounds  1-10,  batch=50  (high error rate, fast learning)
+    (10, 100),   # Phase 2: rounds 11-20,  batch=100 (consolidation)
+    (10, 250),   # Phase 3: rounds 21-30,  batch=250 (generalisation)
+    (10, 500),   # Phase 4: rounds 31-40,  batch=500 (full complexity)
+]
+TOTAL_CURRICULUM_ROUNDS = sum(n for n, _ in CURRICULUM)  # 40
+
+
+def get_curriculum_batch_size(round_num: int) -> int:
+    """Return batch size for the given round based on curriculum schedule."""
+    cumulative = 0
+    for n_rounds, batch_size in CURRICULUM:
+        cumulative += n_rounds
+        if round_num <= cumulative:
+            return batch_size
+    return CURRICULUM[-1][1]   # default to largest phase
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -434,8 +462,12 @@ def select_theta_cases(
         if r["predicted"] == r["true_label"] and r["confidence"] < NEAR_MISS_THRESHOLD
     ]
 
-    # Sort errors by δ descending
-    errors.sort(key=lambda r: compute_delta(r["confidence"], True), reverse=True)
+    # Sort errors by salience-weighted δ descending
+    # High-stakes cases (death/severe) always surface to the top of the theta queue
+    errors.sort(
+        key=lambda r: compute_delta(r["confidence"], True) * compute_salience(r["text"], r.get("rationale", "")),
+        reverse=True,
+    )
     top_errors = errors[:THETA_TOP_DELTA_N]
 
     # Sort near-misses by boundary proximity (lowest confidence first)
@@ -557,7 +589,14 @@ def analyze_and_generate_pairs(
     plasticity: float,
 ) -> list[dict]:
     """
-    Full pipeline: group errors → verify direction → find contrast → generate lesson.
+    Full pipeline: group errors → salience gate → weak-signal filter →
+    direction verify → find contrast → generate lesson.
+
+    Salience gating (norepinephrine/amygdala):
+      - High-salience errors (death/severe) bypass plasticity gate and generate
+        immediately, regardless of ACh plasticity level.
+      - Weak-signal error types (low mean δ) require WEAK_SIGNAL_REPS cumulative
+        occurrences before a pair is generated.
 
     Returns list of newly generated pairs (for theta-pass injection).
     """
@@ -567,14 +606,47 @@ def analyze_and_generate_pairs(
         return []
 
     new_pairs = []
-    pairs_to_generate = max(1, round(len(grouped) * plasticity))  # ACh gating
+    # ACh gating: base budget scales with plasticity, but high-salience bypass this
+    base_budget = max(1, round(len(grouped) * plasticity))
 
     generated = 0
-    for etype, errors in sorted(grouped.items(), key=lambda x: -sum(e["delta"] for e in x[1])):
-        if generated >= pairs_to_generate:
-            break
+    # Sort error types by salience-weighted total δ (high-stakes first)
+    def etype_priority(item):
+        etype, errors = item
+        max_sal = max(e.get("salience", 1.0) for e in errors)
+        total_d = sum(e["delta"] for e in errors)
+        return max_sal * total_d
 
-        # Direction verification: ≥70% same error direction
+    for etype, errors in sorted(grouped.items(), key=etype_priority, reverse=True):
+
+        # ── Salience check ──────────────────────────────────────────────────
+        max_salience = max(e.get("salience", 1.0) for e in errors)
+        is_high_salience = max_salience >= SALIENCE_HIGH_THRESHOLD
+
+        # High-salience bypasses plasticity gate — always generate
+        if not is_high_salience:
+            if generated >= base_budget:
+                break
+
+            # ── Weak-signal gate ─────────────────────────────────────────────
+            # Low-δ error types need cumulative evidence before generating a pair.
+            # This prevents over-fitting to noise in small batches.
+            mean_delta = sum(e["delta"] for e in errors) / max(1, len(errors))
+            if mean_delta <= WEAK_SIGNAL_DELTA_MAX:
+                cumulative_count = db.get_pattern_frequency(etype)
+                if cumulative_count < WEAK_SIGNAL_REPS:
+                    print(
+                        f"  [Weak Signal] {etype}: mean δ={mean_delta:.2f},"
+                        f" seen {cumulative_count}/{WEAK_SIGNAL_REPS}x — waiting for repetition",
+                        flush=True
+                    )
+                    continue
+
+        if is_high_salience:
+            print(f"  [⚡ HIGH SALIENCE] {etype}: bypassing plasticity gate (salience={max_salience:.1f}×)",
+                  flush=True)
+
+        # ── Direction verification ───────────────────────────────────────────
         n_fp = sum(1 for e in errors if e["predicted"] != e["true_label"]
                    and e["predicted"] == "ADE")
         n_fn = len(errors) - n_fp
@@ -586,9 +658,11 @@ def analyze_and_generate_pairs(
                 f"generating contrastive pair only", flush=True
             )
 
-        # Select highest-δ error as anchor
-        anchor_error = max(errors, key=lambda e: e["delta"])
+        # ── Select anchor and generate ───────────────────────────────────────
+        # Anchor = highest salience-weighted δ error
+        anchor_error = max(errors, key=lambda e: e["delta"] * e.get("salience", 1.0))
         anchor_error["error_type"] = etype
+        anchor_salience = anchor_error.get("salience", 1.0)
 
         # Find contrast case
         contrast = find_contrast_case(
@@ -607,7 +681,7 @@ def analyze_and_generate_pairs(
         # Get anchor embedding for future retrieval
         anchor_emb = embedder_embed_one(anchor_error["text"])
 
-        # Store in DB
+        # Store in DB — salience passed for immediate Core promotion if high-stakes
         pair_id = db.upsert_pair(
             anchor_text      = anchor_error["text"],
             anchor_label     = anchor_error["true_label"],
@@ -619,6 +693,7 @@ def analyze_and_generate_pairs(
             delta            = anchor_error["delta"],
             anchor_embedding = anchor_emb,
             round_num        = round_num,
+            salience         = anchor_salience,
         )
 
         new_pair = {
@@ -631,21 +706,25 @@ def analyze_and_generate_pairs(
             "key_distinction": result["key_distinction"],
         }
         new_pairs.append(new_pair)
+
+        salience_tag = f" [⚡{anchor_salience:.1f}×]" if anchor_salience >= 2.0 else ""
         print(
-            f"  [Pair ✓] [{etype}] KEY: {result['key_distinction'][:60]}",
+            f"  [Pair ✓]{salience_tag} [{etype}] KEY: {result['key_distinction'][:60]}",
             flush=True
         )
         generated += 1
 
-    # Enforce MAX_ACTIVE_PAIRS cap — retire lowest-δ when exceeded
+    # Enforce MAX_ACTIVE_PAIRS cap — retire lowest-δ (non-Core) pairs when exceeded
     active = db.get_active_pairs()
     if len(active) > MAX_ACTIVE_PAIRS:
-        to_retire = sorted(active, key=lambda p: p["delta_weight"])
-        n_retire   = len(active) - MAX_ACTIVE_PAIRS
+        non_core = [p for p in active if not p["is_core"]]
+        to_retire = sorted(non_core, key=lambda p: p["delta_weight"])
+        n_retire   = max(0, len(active) - MAX_ACTIVE_PAIRS)
         retire_ids = [p["id"] for p in to_retire[:n_retire]]
-        db.mark_pairs_absorbed(retire_ids)  # retire (not graduate) excess
-        print(f"  [Cap] Retired {n_retire} lowest-δ pairs (cap={MAX_ACTIVE_PAIRS})",
-              flush=True)
+        if retire_ids:
+            db.mark_pairs_absorbed(retire_ids)
+            print(f"  [Cap] Retired {len(retire_ids)} lowest-δ non-Core pairs (cap={MAX_ACTIVE_PAIRS})",
+                  flush=True)
 
     return new_pairs
 
@@ -723,6 +802,9 @@ def consolidate(
         f"   harm attribution — not surface keywords.\n"
         f"2. The 3 most important decision factors (priority order)\n"
         f"3. The 3 most common reasoning errors to avoid\n\n"
+        f"CRITICAL CONSTRAINT: Your causal model MUST maintain high recall — do NOT\n"
+        f"create a definition so strict that it misses genuine ADEs. It is worse to\n"
+        f"miss a real ADE than to flag a borderline case. When uncertain, lean toward ADE.\n\n"
         f"Respond ONLY with JSON (no markdown, no code block):\n"
         f"{{\"causal_model\": \"...\", "
         f"\"key_factors\": [\"...\", \"...\", \"...\"], "
@@ -839,6 +921,11 @@ class APEXLearner:
 
         print(f"\n{db.summary()}", flush=True)
 
+        # ── Preload embedder (prevents 6× parallel model load in workers) ────
+        print("\n[Embedder] Preloading model on main thread...", flush=True)
+        _ = embedder_embed_one("warmup")
+        print("[Embedder] Model ready.", flush=True)
+
         # ── RAG Index ─────────────────────────────────────────────────────────
         rag_dir = str(self.out_dir / "rag_index")
         print(f"\n[RAG] Building/loading FAISS index...", flush=True)
@@ -853,7 +940,11 @@ class APEXLearner:
         history = db.get_round_history()
         completed_rounds = len(history)
         start_round = completed_rounds + 1
-        end_round   = completed_rounds + self.args.rounds
+        n_rounds    = (
+            TOTAL_CURRICULUM_ROUNDS if self.args.curriculum
+            else self.args.rounds
+        )
+        end_round   = completed_rounds + n_rounds
 
         # Threshold restoration
         threshold = 0.50
@@ -861,11 +952,17 @@ class APEXLearner:
             threshold = history[-1].get("threshold", 0.50)
             print(f"[Warm] Restored threshold={threshold:.3f}", flush=True)
 
+        # Consolidation cooldown — restored from history
+        consolidation_cooldown = 0
+
         # Seen cases
         seen_texts = db.get_seen_case_texts() if completed_rounds > 0 else set()
         unseen_train = [c for c in train_pool if c["text"] not in seen_texts]
         random.seed(self.args.seed + completed_rounds)
         random.shuffle(unseen_train)
+
+        # Curriculum offset into unseen_train (varies by round)
+        curriculum_offset = 0
 
         # Base system prompt (blank slate — no lessons injected yet)
         seed_nodes = getattr(config, "seed_nodes", [])
@@ -881,9 +978,21 @@ class APEXLearner:
 
         # ── Training loop ─────────────────────────────────────────────────────
         for round_num in range(start_round, end_round + 1):
-            # Get next batch of unseen cases
-            offset   = (round_num - start_round) * self.args.batch_size
-            batch    = unseen_train[offset: offset + self.args.batch_size]
+            # Determine batch size: curriculum schedule or fixed override
+            if self.args.curriculum:
+                batch_size = get_curriculum_batch_size(round_num)
+                phase = next(
+                    (i+1 for i, (n, _) in enumerate(CURRICULUM)
+                     if round_num <= sum(r for r, _ in CURRICULUM[:i+1])),
+                    len(CURRICULUM)
+                )
+            else:
+                batch_size = self.args.batch_size
+                phase = None
+
+            batch = unseen_train[curriculum_offset: curriculum_offset + batch_size]
+            curriculum_offset += batch_size
+
             if not batch:
                 print(f"\n[Done] Corpus exhausted at R{round_num}.", flush=True)
                 break
@@ -898,8 +1007,9 @@ class APEXLearner:
             print(f"\n{'═'*80}", flush=True)
             n_pairs = len(db.get_active_pairs())
             n_core  = len(db.get_core_pairs())
+            phase_tag = f" | Phase {phase} (batch={batch_size})" if phase else f" | batch={batch_size}"
             print(
-                f"  ROUND {round_num} | "
+                f"  ROUND {round_num}{phase_tag} | "
                 f"Pairs={n_pairs} ({n_core} Core) | "
                 f"Threshold={threshold:.3f} | "
                 f"Seen={len(seen_texts)}",
@@ -951,8 +1061,12 @@ class APEXLearner:
             # Build case_id lookup from DB
             db_cases = {c["text"]: c["id"] for c in db.get_cases("train")}
 
+            n_high_salience = 0
             for r in gamma_adj:
-                case_id = db_cases.get(r["text"], 0)
+                case_id  = db_cases.get(r["text"], 0)
+                rationale = r.get("rationale", "")
+                salience  = compute_salience(r["text"], rationale)
+
                 if r["predicted"] != r["true_label"]:
                     d = db.add_error(
                         case_id   = case_id,
@@ -961,11 +1075,14 @@ class APEXLearner:
                         predicted = r["predicted"],
                         true_label= r["true_label"],
                         confidence= r["confidence"],
-                        rationale = r.get("rationale", ""),
+                        rationale = rationale,
+                        salience  = salience,
                     )
                     delta_total += d
-                    etype = classify_error_type(r.get("rationale", ""))
+                    etype = classify_error_type(rationale)
                     error_types[etype] = error_types.get(etype, 0) + 1
+                    if salience >= SALIENCE_HIGH_THRESHOLD:
+                        n_high_salience += 1
 
                 elif r["confidence"] < NEAR_MISS_THRESHOLD:
                     db.add_near_miss(
@@ -982,7 +1099,8 @@ class APEXLearner:
             n_errors = gamma_m["fn"] + gamma_m["fp"]
             print(
                 f"  δ_total={delta_total:.1f} | "
-                f"Mean δ={delta_total/max(1,n_errors):.3f}",
+                f"Mean δ={delta_total/max(1,n_errors):.3f}"
+                + (f" | ⚡ High-salience errors: {n_high_salience}" if n_high_salience else ""),
                 flush=True
             )
             print(
@@ -991,6 +1109,10 @@ class APEXLearner:
                 flush=True
             )
             print(f"  Near-misses: {n_near_misses}", flush=True)
+
+            # Increment cumulative pattern frequency (weak-signal repetition tracking)
+            for etype, count in error_types.items():
+                db.increment_pattern_frequency(etype, round_num)
 
             # ── Generate contrastive pairs from gamma errors ───────────────
             print(f"\n[Pair Generation] Plasticity={plasticity:.2f}", flush=True)
@@ -1039,14 +1161,29 @@ class APEXLearner:
             threshold = calibrate_threshold_ema(gamma_adj, threshold)
             print(f"\n[Threshold] EMA updated to {threshold:.3f}", flush=True)
 
-            # ── Consolidation (every 3 rounds) ───────────────────────────
+            # ── Flush retrieval counts → Core promotion ───────────────────
+            newly_core = db.flush_retrieval_counts()
+            if newly_core:
+                print(f"  [Core] {newly_core} pair(s) promoted to Core via retrieval frequency",
+                      flush=True)
+
+            # ── Consolidation (every 3 rounds) with cooldown ─────────────
             if round_num % CONSOLIDATION_EVERY == 0:
                 print(f"\n[CONSOLIDATION R{round_num}] Sleep phase...", flush=True)
-                new_knowledge = consolidate(db, llm_fn, round_num)
-                if new_knowledge:
-                    # Update system prompt for evaluation (structural knowledge updated)
-                    structural = db.get_structural_knowledge()
-                    system_prompt = build_system_prompt(base_task, structural, round_num)
+                if consolidation_cooldown > 0:
+                    print(
+                        f"  [Cooldown] Holding causal model stable "
+                        f"({consolidation_cooldown} round(s) remaining)",
+                        flush=True
+                    )
+                    consolidation_cooldown -= 1
+                else:
+                    new_knowledge = consolidate(db, llm_fn, round_num)
+                    if new_knowledge:
+                        # Update system prompt for evaluation (structural knowledge updated)
+                        structural = db.get_structural_knowledge()
+                        system_prompt = build_system_prompt(base_task, structural, round_num)
+                        consolidation_cooldown = CONSOLIDATION_COOLDOWN
 
             # ── Evaluation ────────────────────────────────────────────────
             print(f"\n[Evaluation] 200 held-out cases...", flush=True)
@@ -1146,8 +1283,14 @@ def main():
     parser = argparse.ArgumentParser(description="NEXUS Apex Learner")
     parser.add_argument("--config",      required=True)
     parser.add_argument("--out",         default="run_apex")
-    parser.add_argument("--rounds",      type=int, default=16)
-    parser.add_argument("--batch-size",  type=int, default=1000, dest="batch_size")
+    parser.add_argument("--rounds",      type=int, default=40,
+                        help="Number of rounds (ignored if --curriculum is set)")
+    parser.add_argument("--batch-size",  type=int, default=1000, dest="batch_size",
+                        help="Fixed batch size per round (ignored if --curriculum is set)")
+    parser.add_argument("--curriculum",  action="store_true",
+                        help=f"Use developmental curriculum schedule: "
+                             + ", ".join(f"{b}×{n}" for n, b in CURRICULUM)
+                             + f" ({TOTAL_CURRICULUM_ROUNDS} rounds total)")
     parser.add_argument("--workers",     type=int, default=6)
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--fresh",       action="store_true")

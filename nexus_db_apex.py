@@ -56,14 +56,46 @@ def classify_error_type(rationale: str) -> str:
     return "general"
 
 
-def compute_delta(confidence: float, is_wrong: bool) -> float:
+def compute_delta(confidence: float, is_wrong: bool, salience: float = 1.0) -> float:
     """
-    Dopamine-inspired prediction error signal.
-    δ = confidence × |surprise|
+    Norepinephrine-modulated prediction error signal.
+    δ = confidence × |surprise| × salience
     High confidence + wrong prediction → large δ (large learning signal).
-    Low confidence + wrong prediction → small δ (small learning signal).
+    Death/severe cases (salience 2-3×) → immediate strong encoding.
+    Uncertain predictions → small δ regardless of salience.
     """
-    return round(float(confidence) * float(is_wrong), 4)
+    return round(float(confidence) * float(is_wrong) * float(salience), 4)
+
+
+# ── Salience taxonomy (norepinephrine / amygdala gating) ──────────────────────
+# McGaugh 2004: emotional arousal modulates hippocampal consolidation via NE.
+# Cahill et al. 1994: β-adrenergic activation during stress enhances memory.
+# Flash-bulb memory (Brown & Kulik 1977): high-stakes events encode instantly.
+
+_SALIENCE_HIGH = [   # death / fatal outcome → 3× δ, immediate Core pair
+    "death", "fatal", "died", "mortality", "lethal", "deceased", "exitus",
+    "autopsy", "post-mortem", "fatality", "die ", "dying", "killed",
+]
+_SALIENCE_MED = [    # severe / acute harm → 2× δ, fast Core promotion
+    "life-threatening", "icu", "intensive care", "hospitalized", "hospitalization",
+    "anaphylaxis", "cardiac arrest", "respiratory failure", "organ failure",
+    "sepsis", "hemorrhage", "stroke", "myocardial infarction", "anaphylactic",
+    "emergency", "acute", "critical", "severe adverse",
+]
+
+
+def compute_salience(text: str, rationale: str = "") -> float:
+    """
+    Amygdala-inspired salience gating.
+    High-stakes clinical outcomes are encoded immediately and strongly.
+    Returns: 3.0 (death/fatal), 2.0 (severe/acute), 1.0 (baseline)
+    """
+    combined = (text + " " + rationale).lower()
+    if any(kw in combined for kw in _SALIENCE_HIGH):
+        return 3.0
+    if any(kw in combined for kw in _SALIENCE_MED):
+        return 2.0
+    return 1.0
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -189,7 +221,8 @@ CREATE TABLE IF NOT EXISTS errors (
     confidence   REAL    NOT NULL,
     delta        REAL    NOT NULL DEFAULT 0,
     error_type   TEXT    NOT NULL DEFAULT 'general',
-    rationale    TEXT    NOT NULL DEFAULT ''
+    rationale    TEXT    NOT NULL DEFAULT '',
+    salience     REAL    NOT NULL DEFAULT 1.0
 )
 ---
 CREATE INDEX IF NOT EXISTS idx_errors_round  ON errors(round)
@@ -228,7 +261,9 @@ CREATE TABLE IF NOT EXISTS contrastive_pairs (
     is_active        INTEGER NOT NULL DEFAULT 1,
     created_round    INTEGER NOT NULL,
     last_seen_round  INTEGER NOT NULL,
-    anchor_embedding BLOB
+    anchor_embedding BLOB,
+    retrieval_count  INTEGER NOT NULL DEFAULT 0,
+    salience         REAL    NOT NULL DEFAULT 1.0
 )
 ---
 CREATE INDEX IF NOT EXISTS idx_pairs_type   ON contrastive_pairs(error_type)
@@ -244,6 +279,12 @@ CREATE TABLE IF NOT EXISTS structural_knowledge (
     key_factors     TEXT    NOT NULL DEFAULT '[]',
     error_patterns  TEXT    NOT NULL DEFAULT '[]',
     is_active       INTEGER NOT NULL DEFAULT 1
+)
+---
+CREATE TABLE IF NOT EXISTS pattern_frequency (
+    error_type        TEXT    PRIMARY KEY,
+    cumulative_count  INTEGER NOT NULL DEFAULT 0,
+    last_seen_round   INTEGER NOT NULL DEFAULT 0
 )
 ---
 CREATE TABLE IF NOT EXISTS round_stats (
@@ -270,36 +311,44 @@ CREATE TABLE IF NOT EXISTS round_stats (
 class NexusApexDB:
 
     def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._lock   = threading.Lock()
+        self.db_path         = db_path
+        self._lock           = threading.Lock()
+        self._db_conn        = None   # single persistent connection — avoids APFS open/close churn
+        self._retrieval_counts: dict[int, int] = {}  # pair_id → retrieval count (batched)
         self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Return the persistent connection, creating it if needed."""
+        if self._db_conn is None:
+            self._db_conn = sqlite3.connect(
+                self.db_path, timeout=30, check_same_thread=False
+            )
+            self._db_conn.execute("PRAGMA journal_mode=MEMORY")
+            self._db_conn.execute("PRAGMA foreign_keys=ON")
+            self._db_conn.row_factory = sqlite3.Row
+        return self._db_conn
 
     @contextmanager
     def _conn(self):
+        """Thread-safe context manager over the single persistent connection."""
         with self._lock:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=MEMORY")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.row_factory = sqlite3.Row
+            conn = self._get_connection()
             try:
                 yield conn
                 conn.commit()
-            finally:
-                conn.close()
+            except Exception:
+                conn.rollback()
+                raise
 
     def _init_db(self):
-        """Create all tables using individual execute() calls (avoids APFS executescript issues)."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        try:
-            conn.execute("PRAGMA journal_mode=MEMORY")
-            conn.execute("PRAGMA foreign_keys=ON")
+        """Create all tables. Uses persistent connection from the start."""
+        with self._lock:
+            conn = self._get_connection()
             for stmt in _DDL_STATEMENTS:
                 stmt = stmt.strip()
                 if stmt:
                     conn.execute(stmt)
             conn.commit()
-        finally:
-            conn.close()
 
     # ── Case loading ───────────────────────────────────────────────────────────
 
@@ -354,20 +403,21 @@ class NexusApexDB:
         true_label: str,
         confidence: float,
         rationale: str,
+        salience: float = 1.0,
     ) -> float:
         """
-        Log a misclassification. Computes δ and error_type automatically.
-        Returns δ for the caller's accumulation.
+        Log a misclassification. Computes salience-weighted δ and error_type automatically.
+        Returns δ (salience-weighted) for the caller's accumulation.
         """
-        delta      = compute_delta(confidence, True)
+        delta      = compute_delta(confidence, True, salience)
         error_type = classify_error_type(rationale)
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO errors(case_id, text, round, predicted, true_label,"
-                " confidence, delta, error_type, rationale)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " confidence, delta, error_type, rationale, salience)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (case_id, text, round_num, predicted, true_label,
-                 confidence, delta, error_type, rationale),
+                 confidence, delta, error_type, rationale, salience),
             )
         return delta
 
@@ -435,29 +485,37 @@ class NexusApexDB:
         delta: float,
         anchor_embedding: np.ndarray,
         round_num: int,
+        salience: float = 1.0,
     ) -> int:
         """
         Add a new pair or update an existing one (matched by anchor_text + error_type).
-        Auto-promotes to CORE at occurrence_count >= 3.
+        Core promotion rules:
+          - occurrence_count >= 3  → Core  (repeated pattern)
+          - retrieval_count  >= 5  → Core  (frequently retrieved)
+          - salience >= 2.0        → Core  (high-stakes: death/severe, immediate encoding)
         Returns pair id.
         """
         emb_blob = anchor_embedding.astype(np.float32).tobytes()
+        # High-salience (death/severe) → immediate Core regardless of occurrence count
+        immediate_core = 1 if salience >= 2.0 else 0
         with self._conn() as conn:
             existing = conn.execute(
-                "SELECT id, occurrence_count, delta_weight FROM contrastive_pairs"
+                "SELECT id, occurrence_count, delta_weight, is_core FROM contrastive_pairs"
                 " WHERE anchor_text=? AND error_type=?",
                 (anchor_text, error_type),
             ).fetchone()
             if existing:
                 new_count  = existing["occurrence_count"] + 1
                 new_weight = existing["delta_weight"] + delta
-                is_core    = 1 if new_count >= 3 else 0
+                # Core if: repetition threshold OR already core OR high-salience
+                is_core = 1 if (new_count >= 3 or existing["is_core"] or immediate_core) else 0
                 conn.execute(
                     "UPDATE contrastive_pairs SET occurrence_count=?, delta_weight=?,"
-                    " is_core=?, last_seen_round=?, lesson=?, key_distinction=?"
+                    " is_core=?, last_seen_round=?, lesson=?, key_distinction=?, salience=?"
                     " WHERE id=?",
                     (new_count, new_weight, is_core, round_num,
-                     lesson, key_distinction, existing["id"]),
+                     lesson, key_distinction, max(salience, existing.get("salience", 1.0) if existing else 1.0),
+                     existing["id"]),
                 )
                 return existing["id"]
             else:
@@ -466,11 +524,11 @@ class NexusApexDB:
                     " contrast_text, contrast_label, error_type, lesson,"
                     " key_distinction, delta_weight, occurrence_count, is_core,"
                     " is_absorbed, is_active, created_round, last_seen_round,"
-                    " anchor_embedding)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 1, ?, ?, ?)",
+                    " anchor_embedding, retrieval_count, salience)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, 1, ?, ?, ?, 0, ?)",
                     (anchor_text, anchor_label, contrast_text, contrast_label,
                      error_type, lesson, key_distinction, delta,
-                     round_num, round_num, emb_blob),
+                     immediate_core, round_num, round_num, emb_blob, salience),
                 )
                 return cur.lastrowid
 
@@ -500,6 +558,8 @@ class NexusApexDB:
         """
         Retrieve top-k contrastive pairs by cosine similarity to query embedding.
         Embedding-based retrieval — NOT feature-signature-based.
+        Tracks retrieval counts in memory for batch flush at end of round.
+        Retrieval count >= 5 → promotes pair to Core at flush time.
         """
         pairs = self.get_core_pairs() if core_only else self.get_active_pairs()
         if not pairs:
@@ -519,6 +579,9 @@ class NexusApexDB:
         for i in top_idx:
             p = dict(valid[i])
             p["similarity"] = float(sims[i])
+            # Track retrieval in memory (thread-safe: protected by _lock in _conn)
+            pair_id = p["id"]
+            self._retrieval_counts[pair_id] = self._retrieval_counts.get(pair_id, 0) + 1
             p.pop("anchor_embedding", None)  # don't pass bytes upstream
             result.append(p)
         return result
@@ -615,6 +678,67 @@ class NexusApexDB:
                 "SELECT * FROM round_stats ORDER BY round"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def flush_retrieval_counts(self) -> int:
+        """
+        Batch-write accumulated retrieval counts to DB.
+        Promotes pairs with retrieval_count >= 5 to Core.
+        Call once per round after classification is complete.
+        Returns number of pairs newly promoted to Core.
+        """
+        if not self._retrieval_counts:
+            return 0
+        newly_core = 0
+        with self._conn() as conn:
+            for pair_id, count in self._retrieval_counts.items():
+                conn.execute(
+                    "UPDATE contrastive_pairs SET retrieval_count = retrieval_count + ?"
+                    " WHERE id=?",
+                    (count, pair_id),
+                )
+                # Promote to Core if retrieval threshold reached
+                row = conn.execute(
+                    "SELECT retrieval_count, is_core FROM contrastive_pairs WHERE id=?",
+                    (pair_id,),
+                ).fetchone()
+                if row and row["retrieval_count"] >= 5 and not row["is_core"]:
+                    conn.execute(
+                        "UPDATE contrastive_pairs SET is_core=1 WHERE id=?",
+                        (pair_id,),
+                    )
+                    newly_core += 1
+        self._retrieval_counts.clear()
+        return newly_core
+
+    def increment_pattern_frequency(self, error_type: str, round_num: int) -> int:
+        """
+        Increment cumulative occurrence count for an error type.
+        Used to detect weak-signal patterns that need repetition before generating a pair.
+        Returns new cumulative count.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO pattern_frequency(error_type, cumulative_count, last_seen_round)"
+                " VALUES (?, 1, ?)"
+                " ON CONFLICT(error_type) DO UPDATE SET"
+                " cumulative_count = cumulative_count + 1,"
+                " last_seen_round = excluded.last_seen_round",
+                (error_type, round_num),
+            )
+            row = conn.execute(
+                "SELECT cumulative_count FROM pattern_frequency WHERE error_type=?",
+                (error_type,),
+            ).fetchone()
+        return row["cumulative_count"] if row else 1
+
+    def get_pattern_frequency(self, error_type: str) -> int:
+        """Return cumulative occurrence count for an error type across all rounds."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT cumulative_count FROM pattern_frequency WHERE error_type=?",
+                (error_type,),
+            ).fetchone()
+        return row["cumulative_count"] if row else 0
 
     def summary(self) -> str:
         counts = self.count_cases()
