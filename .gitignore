@@ -1,12 +1,5 @@
-# ── Run outputs ───────────────────────────────────────────────
-run_v3_*/
-run_04/
-run_05_branch_*/
-run_06_micro/
-run_07_rag/
-run_08_rag/
-run_v304_enterprise/
-run_cortex_v1_enterprise/
+# ── Run outputs (all run_* directories — large FAISS indices, DBs, logs) ──────
+run_*/
 population_runs/
 results/
 
@@ -15,6 +8,8 @@ paper/
 
 # ── Generated artifacts ───────────────────────────────────────
 *.db
+*.db-journal
+*.bak
 *.log
 nexus_best_tree.json
 nexus_final_tree.json
