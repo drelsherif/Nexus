@@ -1,0 +1,434 @@
+{
+  "rounds": [
+    {
+      "round": 1,
+      "phase": "embryonic",
+      "f1": 0.7472527472527472,
+      "precision": 0.8095238095238095,
+      "recall": 0.6938775510204082,
+      "tp": 34,
+      "fp": 8,
+      "fn": 15,
+      "tn": 143,
+      "n_evaluated": 200,
+      "n_columns": 5,
+      "n_active": 4,
+      "n_shadow": 1,
+      "firing_threshold": 1.723,
+      "genesis": true,
+      "errors_this_round": 14,
+      "col_activations": {
+        "ROOT": 145,
+        "COL_SHORT": 34,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13
+      }
+    },
+    {
+      "round": 2,
+      "phase": "embryonic",
+      "f1": 0.8181818181818182,
+      "precision": 0.7377049180327869,
+      "recall": 0.9183673469387755,
+      "tp": 45,
+      "fp": 16,
+      "fn": 4,
+      "tn": 135,
+      "n_evaluated": 200,
+      "n_columns": 6,
+      "n_active": 5,
+      "n_shadow": 1,
+      "firing_threshold": 4.0,
+      "genesis": true,
+      "errors_this_round": 24,
+      "col_activations": {
+        "ROOT": 144,
+        "COL_SHORT": 34,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1
+      }
+    },
+    {
+      "round": 3,
+      "phase": "embryonic",
+      "f1": 0.7252747252747253,
+      "precision": 0.7857142857142857,
+      "recall": 0.673469387755102,
+      "tp": 33,
+      "fp": 9,
+      "fn": 16,
+      "tn": 142,
+      "n_evaluated": 200,
+      "n_columns": 7,
+      "n_active": 6,
+      "n_shadow": 1,
+      "firing_threshold": 1.0,
+      "genesis": true,
+      "errors_this_round": 11,
+      "col_activations": {
+        "ROOT": 142,
+        "COL_SHORT": 34,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 4,
+      "phase": "embryonic",
+      "f1": 0.7692307692307692,
+      "precision": 0.6617647058823529,
+      "recall": 0.9183673469387755,
+      "tp": 45,
+      "fp": 23,
+      "fn": 4,
+      "tn": 128,
+      "n_evaluated": 200,
+      "n_columns": 7,
+      "n_active": 7,
+      "n_shadow": 0,
+      "firing_threshold": 2.5,
+      "genesis": false,
+      "errors_this_round": 11,
+      "col_activations": {
+        "COL_SUPPORTIVE_THERAPY": 2,
+        "ROOT": 140,
+        "COL_SHORT": 34,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 5,
+      "phase": "embryonic",
+      "f1": 0.7647058823529412,
+      "precision": 0.7358490566037735,
+      "recall": 0.7959183673469388,
+      "tp": 39,
+      "fp": 14,
+      "fn": 10,
+      "tn": 137,
+      "n_evaluated": 200,
+      "n_columns": 8,
+      "n_active": 7,
+      "n_shadow": 1,
+      "firing_threshold": 4.0,
+      "genesis": true,
+      "errors_this_round": 15,
+      "col_activations": {
+        "COL_SUPPORTIVE_THERAPY": 2,
+        "ROOT": 140,
+        "COL_SHORT": 34,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 6,
+      "phase": "developmental",
+      "f1": 0.7676767676767676,
+      "precision": 0.76,
+      "recall": 0.7755102040816326,
+      "tp": 38,
+      "fp": 12,
+      "fn": 11,
+      "tn": 139,
+      "n_evaluated": 200,
+      "n_columns": 8,
+      "n_active": 7,
+      "n_shadow": 1,
+      "firing_threshold": 1.0,
+      "genesis": true,
+      "errors_this_round": 18,
+      "col_activations": {
+        "ROOT": 142,
+        "COL_SHORT": 34,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 7,
+      "phase": "developmental",
+      "f1": 0.7766990291262137,
+      "precision": 0.7407407407407407,
+      "recall": 0.8163265306122449,
+      "tp": 40,
+      "fp": 14,
+      "fn": 9,
+      "tn": 137,
+      "n_evaluated": 200,
+      "n_columns": 8,
+      "n_active": 8,
+      "n_shadow": 0,
+      "firing_threshold": 1.0,
+      "genesis": false,
+      "errors_this_round": 16,
+      "col_activations": {
+        "ROOT": 137,
+        "COL_SHORT": 34,
+        "COL_RECHALLENGE_OUTCOME": 5,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 8,
+      "phase": "developmental",
+      "f1": 0.7884615384615385,
+      "precision": 0.7454545454545455,
+      "recall": 0.8367346938775511,
+      "tp": 41,
+      "fp": 14,
+      "fn": 8,
+      "tn": 137,
+      "n_evaluated": 200,
+      "n_columns": 8,
+      "n_active": 7,
+      "n_shadow": 1,
+      "firing_threshold": 1.05,
+      "genesis": true,
+      "errors_this_round": 14,
+      "col_activations": {
+        "ROOT": 137,
+        "COL_SHORT": 34,
+        "COL_RECHALLENGE_OUTCOME": 5,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 9,
+      "phase": "developmental",
+      "f1": 0.7704918032786885,
+      "precision": 0.6438356164383562,
+      "recall": 0.9591836734693877,
+      "tp": 47,
+      "fp": 26,
+      "fn": 2,
+      "tn": 125,
+      "n_evaluated": 200,
+      "n_columns": 9,
+      "n_active": 8,
+      "n_shadow": 1,
+      "firing_threshold": 4.0,
+      "genesis": true,
+      "errors_this_round": 20,
+      "col_activations": {
+        "ROOT": 137,
+        "COL_SHORT": 34,
+        "COL_RECHALLENGE_OUTCOME": 5,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    },
+    {
+      "round": 10,
+      "phase": "developmental",
+      "f1": 0.8440366972477065,
+      "precision": 0.7666666666666667,
+      "recall": 0.9387755102040817,
+      "tp": 46,
+      "fp": 14,
+      "fn": 3,
+      "tn": 137,
+      "n_evaluated": 200,
+      "n_columns": 10,
+      "n_active": 9,
+      "n_shadow": 1,
+      "firing_threshold": 2.5,
+      "genesis": true,
+      "errors_this_round": 17,
+      "col_activations": {
+        "ROOT": 137,
+        "COL_SHORT": 34,
+        "COL_RECHALLENGE_OUTCOME": 5,
+        "COL_INDUCED": 8,
+        "COL_NEGATION": 13,
+        "COL_RESOLUTION": 1,
+        "COL_MECHANISM": 2
+      }
+    }
+  ],
+  "genesis_log": [
+    {
+      "round": 1,
+      "phase": "embryonic",
+      "col_id": "COL_RESOLUTION",
+      "jaccard": 0.0,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 2,
+      "phase": "embryonic",
+      "col_id": "COL_RESOLUTION",
+      "scoped_delta": 0.0,
+      "col_f1": 0.8125000000000001,
+      "root_f1": 0.8125000000000001,
+      "n_matched": 7,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 2,
+      "phase": "embryonic",
+      "col_id": "COL_MECHANISM",
+      "jaccard": 0.09090909090909091,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 3,
+      "phase": "embryonic",
+      "col_id": "COL_MECHANISM",
+      "scoped_delta": 0.0,
+      "col_f1": 0.8108108108108107,
+      "root_f1": 0.8108108108108107,
+      "n_matched": 3,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 3,
+      "phase": "embryonic",
+      "col_id": "COL_SUPPORTIVE_THERAPY",
+      "jaccard": 0.25,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 4,
+      "phase": "embryonic",
+      "col_id": "COL_SUPPORTIVE_THERAPY",
+      "scoped_delta": 0.0,
+      "col_f1": 0.7999999999999999,
+      "root_f1": 0.7999999999999999,
+      "n_matched": 4,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 5,
+      "phase": "embryonic",
+      "col_id": "COL_DESCRIPTIVE_TOXICITY",
+      "jaccard": 0.0,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 6,
+      "phase": "developmental",
+      "col_id": "COL_DESCRIPTIVE_TOXICITY",
+      "scoped_delta": 0.0,
+      "col_f1": 0.8148148148148148,
+      "root_f1": 0.8148148148148148,
+      "n_matched": 1,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 6,
+      "phase": "developmental",
+      "col_id": "COL_RECHALLENGE_OUTCOME",
+      "jaccard": 0.0,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 7,
+      "phase": "developmental",
+      "col_id": "COL_RECHALLENGE_OUTCOME",
+      "scoped_delta": 0.0,
+      "col_f1": 0.9411764705882353,
+      "root_f1": 0.9411764705882353,
+      "n_matched": 10,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 8,
+      "phase": "developmental",
+      "col_id": "COL_ADVERSE_REACTION",
+      "jaccard": 0.0,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 9,
+      "phase": "developmental",
+      "col_id": "COL_ADVERSE_REACTION",
+      "scoped_delta": 0.0,
+      "col_f1": 0.6666666666666667,
+      "root_f1": 0.6666666666666667,
+      "n_matched": 2,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 9,
+      "phase": "developmental",
+      "col_id": "COL_TREATMENT_CONTEXT",
+      "jaccard": 0.0,
+      "status": "shadow",
+      "rolled_back": null
+    },
+    {
+      "round": 10,
+      "phase": "developmental",
+      "col_id": "COL_TREATMENT_CONTEXT",
+      "scoped_delta": 0.0,
+      "col_f1": 0.9090909090909091,
+      "root_f1": 0.9090909090909091,
+      "n_matched": 0,
+      "rolled_back": false,
+      "probe_type": "trigger_scoped"
+    },
+    {
+      "round": 10,
+      "phase": "developmental",
+      "col_id": "COL_DEPENDENCY_STUDY",
+      "jaccard": 0.0,
+      "status": "shadow",
+      "rolled_back": null
+    }
+  ],
+  "pruning_log": [
+    {
+      "round": 6,
+      "pruned": [
+        "COL_SUPPORTIVE_THERAPY"
+      ]
+    },
+    {
+      "round": 8,
+      "pruned": [
+        "COL_DESCRIPTIVE_TOXICITY"
+      ]
+    }
+  ],
+  "meta_log": [
+    {
+      "diagnosis": "Expecting ',' delimiter: line 15 column 6 (char 1856)",
+      "interventions": []
+    },
+    {
+      "diagnosis": "Expecting ',' delimiter: line 15 column 6 (char 1731)",
+      "interventions": []
+    }
+  ]
+}

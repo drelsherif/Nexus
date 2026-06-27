@@ -1,0 +1,11 @@
+[
+  {
+    "col_id": "COL_CASE_PRESENTATION",
+    "trigger": "has_report and has_developed and not has_induced and not has_toxicity",
+    "spec": 2,
+    "probe_delta": -0.0,
+    "round": 7,
+    "jaccard": 1.0,
+    "reason": "Rejected at genesis: Trigger overlap too high: Jaccard=1.000 with 'COL_RESOLUTION' (max=0.5)"
+  }
+]

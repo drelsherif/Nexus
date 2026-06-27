@@ -1,0 +1,130 @@
+{
+  "task_name": "ADE Classification — Cortex v2.0",
+  "description": "Classify medical literature sentences as ADE (Adverse Drug Event) or NOT_ADE. Cortex v2.0 adds three missing learning mechanisms to v1.0: MCQLibrary (contrastive lessons replacing raw error buffer), RejectedProposalMemory (persistent genesis failure log), and MetaAgent (LLM as diagnostic physician). New structural mechanisms: shadow column warm-up period and trigger-scoped genesis probe.",
+
+  "labels": ["ADE", "NOT_ADE"],
+  "positive_label": "ADE",
+  "negative_label": "NOT_ADE",
+
+  "class_prior": "auto",
+  "ade_bias_softening": 0.5,
+
+  "optimization_target": "f1",
+  "optimization_beta": 1.0,
+
+  "embed_model": "pritamdeka/S-PubMedBert-MS-MARCO",
+
+  "route_definitions": [
+    {
+      "name": "causation",
+      "focus": "Direct causal language drug to harm",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "negation",
+      "focus": "Adverse outcome negated or hypothetical",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "drug_effect",
+      "focus": "Retrieved evidence confirms drug-effect pair",
+      "default_vote": "NOT_ADE"
+    },
+    {
+      "name": "context",
+      "focus": "Therapeutic intent vs documented adverse outcome",
+      "default_vote": "NOT_ADE"
+    }
+  ],
+
+  "seed_nodes": [
+    {
+      "id": "ROOT",
+      "trigger": null,
+      "description": "Primary cortical column — general ADE classifier, fires when no specialist matches (specificity=0)",
+      "prompt": "You are a clinical NLP classifier. Your task: determine whether the following sentence describes an Adverse Drug Event (ADE) — a harmful outcome caused by a drug — or NOT_ADE.\n\nClassify the sentence as ADE or NOT_ADE.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "COL_NEGATION",
+      "trigger": "has_negation",
+      "description": "Negation specialist — handles sentences containing explicit negation language (specificity=1)",
+      "prompt": "You are a clinical NLP classifier. This sentence contains negation language. Your task: determine whether the sentence describes an Adverse Drug Event (ADE) or NOT_ADE, paying close attention to what is negated and what is affirmed.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "COL_INDUCED",
+      "trigger": "has_induced or has_associated",
+      "description": "Causation specialist — handles sentences with causal language (induced, associated) linking drug to outcome (specificity=1)",
+      "prompt": "You are a clinical NLP classifier. This sentence contains causal language (e.g., 'induced', 'associated with'). Your task: determine whether this language links a drug to a harmful adverse outcome (ADE) or to something else (NOT_ADE).\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    },
+    {
+      "id": "COL_SHORT",
+      "trigger": "has_short and not has_negation",
+      "description": "Short-sentence specialist — telegraphic clinical notations without negation (specificity=2)",
+      "prompt": "You are a clinical NLP classifier. This is a short sentence (under 80 characters) without negation. Your task: determine whether this sentence describes an Adverse Drug Event (ADE) or NOT_ADE.\n\nRespond ONLY with JSON:\n{\"classification\": \"ADE\" or \"NOT_ADE\", \"confidence\": 0.0-1.0, \"rationale\": \"<one sentence>\"}"
+    }
+  ],
+
+  "hyperparameters": {
+    "rounds": 20,
+    "batch_size": 250,
+    "eval_size": 200,
+    "probe_size": 300,
+    "k": 5,
+    "engram_threshold": 5,
+    "workers": 4,
+    "initial_firing_threshold": 1.723,
+    "bcm_tau": 0.15,
+    "critical_period_T_min": 0.60,
+    "critical_period_T_max": 0.85,
+    "critical_period_tau": 5.0,
+    "jaccard_overlap_threshold": 0.50,
+    "apoptosis_min_activation": 2.0,
+    "apoptosis_min_rounds_alive": 3,
+    "mcq_library_capacity": 40,
+    "mcq_max_per_round": 6,
+    "route_timeout": 30.0,
+    "shadow_rollback_threshold": -0.05,
+    "meta_agent_consecutive_decline": 2
+  },
+
+  "_design_notes": {
+    "v1_failure_modes_addressed": [
+      "FM-Net-Learning-0: WorkingMemory showed errors only ('you got this wrong'). MCQLibrary now shows right+wrong+why. Contrastive signal is the missing learning mechanism.",
+      "FM-Repeated-Genesis: LLM proposed has_toxicity+negations 3 times with no memory. RejectedProposalMemory now fed to LLM before every genesis call.",
+      "FM-Cold-Column: Genesis probe ran on cold columns (0 traces, 0 rehearsal). Shadow period (1 round observation) + trigger-scoped probe now apply.",
+      "FM-Global-Probe-Dilution: 50-case global probe judged columns on cases they'd never route. Trigger-scoped probe now evaluates only trigger-matching cases.",
+      "FM-No-Adult: No diagnostic mechanism when F1 declined. MetaAgent now triggers on 2+ consecutive F1 declines."
+    ],
+    "v2_new_mechanisms": [
+      "MCQLibrary: BCM-gated contrastive MCQ generation per column (LTD→2 MCQs, LTP→8 MCQs)",
+      "RejectedProposalMemory: persistent log of all failed genesis attempts, read by LLM at genesis time",
+      "MetaAgent: LLM as diagnostic physician — receives full cortex state + F1 trajectory + error patterns",
+      "Shadow column period: 1-round observation before routing activation",
+      "Trigger-scoped genesis probe: evaluate only cases matching the proposed column's trigger"
+    ],
+    "retained_from_v1": [
+      "BCM plasticity (BCMState, θ_M sliding threshold)",
+      "Critical period plasticity (rising genesis threshold T(t))",
+      "Competitive routing (winner-take-all by specificity)",
+      "Homeostatic calibration (FiringThreshold sweep, 0 LLM cost)",
+      "Neurogenesis + apoptosis with MemoryTrace bequeathal",
+      "EnggramCluster detection (cosine similarity)",
+      "Route abstention (FM-2 fix)",
+      "FM-6 all-negative trigger rejection",
+      "FM-7 genesis rollback on probe damage",
+      "FM-8 outer as_completed TimeoutError catch",
+      "Warm restart (firing_threshold + completed_rounds in cortex_state.json)",
+      "Jaccard overlap audit (FM-5 fix)"
+    ],
+    "biological_references": [
+      "BCM theory (Bienenstock, Cooper, Munro 1982)",
+      "Critical period plasticity (Wiesel & Hubel 1963; Hensch 2004)",
+      "Competitive learning (Rumelhart & Zipser 1985)",
+      "Homeostatic plasticity (Turrigiano et al. 1998)",
+      "Neurogenesis & apoptosis (Eriksson et al. 1998)",
+      "Engram consolidation (Semon 1904; Josselyn et al. 2015)",
+      "Contrastive learning / worked examples (VanLehn 2011)",
+      "Working memory (Baddeley 1992)"
+    ]
+  }
+}

@@ -30,8 +30,30 @@ _MODEL_PREFERENCE = [
     "all-MiniLM-L6-v2",
 ]
 
-_model = None       # lazy singleton
+_model      = None       # lazy singleton
 _model_name = None
+_MOCK_DIM   = 768        # dimension for mock embeddings
+_USE_MOCK   = False      # set True via enable_mock_embeddings()
+
+
+def enable_mock_embeddings():
+    """Call this when running in --mock mode to avoid requiring sentence-transformers."""
+    global _USE_MOCK
+    _USE_MOCK = True
+    print("[Embedder] Mock mode — using deterministic pseudo-embeddings", flush=True)
+
+
+def _mock_embed(texts: list[str]) -> np.ndarray:
+    """Deterministic pseudo-embeddings seeded by text hash. Consistent across calls."""
+    import hashlib
+    vecs = []
+    for t in texts:
+        seed = int(hashlib.md5(t.encode()).hexdigest(), 16) % (2**31)
+        rng  = np.random.default_rng(seed)
+        v    = rng.standard_normal(_MOCK_DIM).astype(np.float32)
+        v   /= np.linalg.norm(v) + 1e-9
+        vecs.append(v)
+    return np.stack(vecs)
 
 
 def _load_model(preferred: str | None = None):
@@ -66,7 +88,10 @@ def embed(texts: list[str], batch_size: int = 64, model_name: str | None = None)
     """
     Embed a list of strings.
     Returns float32 ndarray of shape (N, dim), L2-normalised.
+    In --mock mode, returns deterministic pseudo-embeddings.
     """
+    if _USE_MOCK:
+        return _mock_embed(texts)
     model = _load_model(model_name)
     vecs = model.encode(
         texts,
@@ -85,6 +110,8 @@ def embed_one(text: str, model_name: str | None = None) -> np.ndarray:
 
 def model_dim(model_name: str | None = None) -> int:
     """Return embedding dimension without encoding anything."""
+    if _USE_MOCK:
+        return _MOCK_DIM
     model = _load_model(model_name)
     return model.get_sentence_embedding_dimension()
 

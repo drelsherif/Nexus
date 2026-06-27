@@ -956,6 +956,16 @@ class Cortex:
         if bad:
             return False, f"invalid trigger variables: {bad}"
 
+        # Reject all-negative triggers (spec=0): these compete directly with ROOT
+        # and add no discriminative power. A trigger like "not X and not Y" has
+        # zero positive conditions — it would tie with ROOT (spec=0) and cause
+        # undefined routing behavior with no specialization benefit.
+        temp_col = CorticalColumn(col_id="__tmp__", description="", trigger_condition=trigger, prompt="")
+        if temp_col.compute_specificity() == 0 and trigger.strip() not in ("True", ""):
+            return False, (f"trigger has spec=0 (all-negative conditions: {trigger!r}). "
+                           f"A genesis column must have ≥1 positive feature condition "
+                           f"to specialize over ROOT.")
+
         # ── Critical period threshold ──────────────────────────────────────────────
         genesis_phase = phase_for_round(round_num)
 
@@ -1038,9 +1048,10 @@ class Cortex:
 
     # ── Serialization ─────────────────────────────────────────────────────────────
 
-    def save(self, out_path: str) -> None:
+    def save(self, out_path: str, meta: dict | None = None) -> None:
         data = {
             "cortex_version": "1.0",
+            **(meta or {}),   # e.g. firing_threshold, completed_rounds
             "columns": [{"id": c.id, "description": c.description,
                          "trigger_condition": c.trigger_condition,
                          "prompt": c.prompt,
@@ -1084,6 +1095,13 @@ class Cortex:
                     bequeathed=td.get("bequeathed", False),
                     bequeathed_from=td.get("from"),
                 ))
+            # Restore BCM plasticity state (theta_m, ltp_count, ltd_count)
+            bcm_d = cd.get("bcm_state", {})
+            if bcm_d:
+                col.bcm_state.theta_m   = bcm_d.get("theta_m", 0.1)
+                col.bcm_state.tau       = bcm_d.get("tau", 0.15)
+                col.bcm_state.ltp_count = bcm_d.get("ltp_count", 0)
+                col.bcm_state.ltd_count = bcm_d.get("ltd_count", 0)
             cortex._columns.append(col)
         return cortex
 
@@ -1171,17 +1189,27 @@ def classify_with_routes(
             executor.submit(fn, text, examples, llm_fn, principle_context): name
             for name, fn in route_fns.items()
         }
-        for future in as_completed(futures, timeout=route_timeout + 5):
-            route_name = futures[future]
-            try:
-                result = future.result(timeout=route_timeout)
-                route_results[route_name] = result   # None if route abstained
-            except FuturesTimeoutError:
-                print(f"  [ROUTE TIMEOUT] {route_name} — abstaining", file=sys.stderr)
-                route_results[route_name] = None
-            except Exception as e:
-                print(f"  [ROUTE ERROR] {route_name}: {e} — abstaining", file=sys.stderr)
-                route_results[route_name] = None
+        try:
+            for future in as_completed(futures, timeout=route_timeout + 5):
+                route_name = futures[future]
+                try:
+                    result = future.result(timeout=route_timeout)
+                    route_results[route_name] = result   # None if route abstained
+                except FuturesTimeoutError:
+                    print(f"  [ROUTE TIMEOUT] {route_name} — abstaining", file=sys.stderr)
+                    route_results[route_name] = None
+                except Exception as e:
+                    print(f"  [ROUTE ERROR] {route_name}: {e} — abstaining", file=sys.stderr)
+                    route_results[route_name] = None
+        except FuturesTimeoutError:
+            # as_completed iterator itself timed out — mark all unfinished routes as abstained
+            # (Fix-FM-8: prevents uncaught TimeoutError from crashing the run)
+            for future, route_name in futures.items():
+                if route_name not in route_results:
+                    future.cancel()
+                    route_results[route_name] = None
+                    print(f"  [ROUTE TIMEOUT] {route_name} — as_completed expired, abstaining",
+                          file=sys.stderr)
 
     # Weighted ensemble (abstained routes excluded — Fix-FM-2)
     route_weights = {"causation": 1.5, "negation": 1.5, "drug_effect": 1.2, "context": 1.0}
@@ -2091,7 +2119,7 @@ class CortexTrainer:
                     )
 
                     if approved:
-                        # Post-genesis probe to measure actual improvement
+                        # Post-genesis probe to measure actual F1 impact
                         probe_f1_after = self._probe_f1(
                             cortex, probe_pool, rag_index, llm_fn,
                             homeostatic, config, max_cases=50
@@ -2100,21 +2128,38 @@ class CortexTrainer:
                         print(f"  [Post-Genesis Probe] F1 Δ = {delta_f1:+.4f} "
                               f"({probe_f1_before:.4f} → {probe_f1_after:.4f})", flush=True)
 
-                        # Consolidate cluster into MemoryTrace on new column
-                        new_col = cortex.get_column(proposal["id"])
-                        if new_col:
-                            new_col.add_memory_trace(
-                                text=f"Spawned from EnggramCluster R{round_num}: "
-                                     f"{proposal.get('description','')[:100]}",
-                                consolidation_score=largest.coherence,
-                                round_num=round_num,
-                            )
-                        genesis_approved = True
-                        self.genesis_log.append({
-                            "round": round_num, "phase": phase.value,
-                            "col_id": proposal["id"], "jaccard": j,
-                            "probe_delta_f1": delta_f1,
-                        })
+                        # ROLLBACK if probe F1 dropped significantly — apoptosis on genesis
+                        # A new column that hurts global performance should be immediately pruned.
+                        # Threshold: -0.02 (allow small noise, reject real degradation).
+                        ROLLBACK_THRESHOLD = -0.02
+                        if delta_f1 < ROLLBACK_THRESHOLD:
+                            with cortex._lock:
+                                new_col = cortex.get_column(proposal["id"])
+                                if new_col:
+                                    cortex._columns.remove(new_col)
+                            print(f"  [Genesis ROLLED BACK] F1 Δ={delta_f1:+.4f} < "
+                                  f"{ROLLBACK_THRESHOLD} — column pruned immediately", flush=True)
+                            self.genesis_log.append({
+                                "round": round_num, "phase": phase.value,
+                                "col_id": proposal["id"], "jaccard": j,
+                                "probe_delta_f1": delta_f1, "rolled_back": True,
+                            })
+                        else:
+                            # Consolidate cluster into MemoryTrace on new column
+                            new_col = cortex.get_column(proposal["id"])
+                            if new_col:
+                                new_col.add_memory_trace(
+                                    text=f"Spawned from EnggramCluster R{round_num}: "
+                                         f"{proposal.get('description','')[:100]}",
+                                    consolidation_score=largest.coherence,
+                                    round_num=round_num,
+                                )
+                            genesis_approved = True
+                            self.genesis_log.append({
+                                "round": round_num, "phase": phase.value,
+                                "col_id": proposal["id"], "jaccard": j,
+                                "probe_delta_f1": delta_f1, "rolled_back": False,
+                            })
                     else:
                         print(f"  [Genesis Rejected] {reason}", flush=True)
             else:
@@ -2195,10 +2240,15 @@ class CortexTrainer:
         for item in sample:
             feats = extract_features(item["text"])
             col = cortex.route(feats)
-            result = classify_with_routes(
-                text=item["text"], rag_index=rag_index, llm_fn=llm_fn,
-                column=col, firing_threshold=homeostatic.firing_threshold,
-            )
+            try:
+                result = classify_with_routes(
+                    text=item["text"], rag_index=rag_index, llm_fn=llm_fn,
+                    column=col, firing_threshold=homeostatic.firing_threshold,
+                )
+            except Exception as e:
+                # Belt-and-suspenders: skip case on any route error (Fix-FM-8)
+                print(f"  [PROBE ERROR] skipping case: {e}", file=sys.stderr)
+                continue
             pred = result["label"]
             true = item["label"]
             if pred == pos and true == pos:    tp += 1
@@ -2251,9 +2301,18 @@ class CortexTrainer:
 
         # ── Cortex initialization ─────────────────────────────────────────────────
         cortex_path = str(self.out_dir / "cortex_state.json")
+        saved_firing_threshold = 1.723   # Default: 71/29 ADE class imbalance prior
+        completed_rounds = 0             # Rounds already done in prior runs
         if not self.args.fresh and Path(cortex_path).exists():
             print(f"\n[Cortex] Loading existing state from {cortex_path}...", flush=True)
+            # Peek at meta fields before loading (firing_threshold, completed_rounds)
+            saved_meta = json.loads(Path(cortex_path).read_text())
+            saved_firing_threshold = saved_meta.get("firing_threshold", 1.723)
+            completed_rounds       = saved_meta.get("completed_rounds", 0)
             cortex = Cortex.load(cortex_path)
+            if completed_rounds:
+                print(f"  Warm restart: resuming from round {completed_rounds + 1} "
+                      f"(FiringThreshold={saved_firing_threshold:.3f})", flush=True)
         else:
             print(f"\n[Cortex] Building seed cortex from config...", flush=True)
             cortex = self.build_seed_cortex(config)
@@ -2262,7 +2321,7 @@ class CortexTrainer:
 
         # ── Biological controllers ────────────────────────────────────────────────
         homeostatic = HomeostaticPlasticity(
-            initial_threshold=1.723,  # Prior: 71/29 ADE class imbalance
+            initial_threshold=saved_firing_threshold,  # Restored or prior-based default
             target=config.calibration_target if hasattr(config, "calibration_target") else "f1",
         )
         critical_period = CriticalPeriod(T_min=0.60, T_max=0.85, tau=5.0)
@@ -2270,7 +2329,12 @@ class CortexTrainer:
         # ── Training rounds ───────────────────────────────────────────────────────
         random.seed(self.args.seed)
 
-        for round_num in range(1, self.args.rounds + 1):
+        # On warm restart, continue from where we left off.
+        # completed_rounds=6 + args.rounds=20 → rounds 7..20 (14 more rounds).
+        start_round = completed_rounds + 1
+        end_round   = completed_rounds + self.args.rounds
+
+        for round_num in range(start_round, end_round + 1):
             # Sample training batch
             batch_size = config.batch_size if hasattr(config, "batch_size") else 250
             batch = random.sample(train_pool, min(batch_size, len(train_pool)))
@@ -2289,8 +2353,11 @@ class CortexTrainer:
             )
             self.round_history.append(result)
 
-            # Save state after each round
-            cortex.save(cortex_path)
+            # Save state after each round — include meta for warm restart
+            cortex.save(cortex_path, meta={
+                "firing_threshold": homeostatic.firing_threshold,
+                "completed_rounds": round_num,
+            })
             self._save_run_log()
 
         # ── Final report ──────────────────────────────────────────────────────────
